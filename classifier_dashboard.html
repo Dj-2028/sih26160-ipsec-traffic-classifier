@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ESP Flow Classifier — SIH26160</title>
+<style>
+:root{--bg:#0b1420;--panel:#101c2b;--raised:#142334;--line:#223347;--text:#e7eef5;--dim:#7f95a8;--accent:#4fd1c5;--danger:#e2685a;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans)}
+body{padding-top:env(safe-area-inset-top,0)}
+.wrap{max-width:980px;margin:0 auto;padding:26px 20px 60px}
+header{display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:14px;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:22px}
+h1{font-size:1.4rem;margin:0 0 4px;font-weight:600}.sub{color:var(--dim);font-size:.88rem;max-width:48ch;line-height:1.5}
+.conn{display:flex;align-items:center;gap:9px;font:.76rem var(--mono);color:var(--dim)}
+input,select{background:var(--raised);border:1px solid var(--line);color:var(--text);font:.8rem var(--mono);padding:8px 10px;border-radius:4px}
+input:focus,select:focus{outline:none;border-color:var(--accent)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--dim)}.dot.up{background:var(--accent);box-shadow:0 0 8px var(--accent)}.dot.down{background:var(--danger)}
+.tabs{display:flex;gap:6px;margin-bottom:14px}
+.tab{background:none;border:1px solid var(--line);color:var(--dim);padding:8px 16px;border-radius:4px;cursor:pointer;font-size:.85rem}
+.tab.on{border-color:var(--accent);color:var(--text);background:var(--raised)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:20px;margin-bottom:18px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+button.go{background:var(--accent);color:#06201d;border:none;font-weight:600;padding:9px 18px;border-radius:4px;cursor:pointer;font-size:.85rem}
+button.go:disabled{opacity:.45;cursor:not-allowed}
+button.stop{background:none;border:1px solid var(--danger);color:var(--danger);padding:9px 18px;border-radius:4px;cursor:pointer;font-size:.85rem}
+button.stop:disabled{opacity:.35;cursor:not-allowed}
+.hint{color:var(--dim);font-size:.8rem;line-height:1.55;margin-top:12px}
+.err{border:1px solid var(--danger);background:rgba(226,104,90,.08);color:var(--danger);padding:12px 14px;border-radius:4px;font-size:.82rem;line-height:1.55;margin-bottom:16px}
+.big{font:600 2.4rem var(--mono);letter-spacing:-.02em;margin:0 0 2px}.note{color:var(--dim);font-size:.82rem;margin-bottom:18px}
+.item{display:grid;grid-template-columns:88px 62px 1fr 52px;gap:12px;align-items:center;padding:9px 0;border-top:1px solid var(--line);font-size:.8rem}
+.item .lbl{font-family:var(--mono);font-weight:600}.item .meta{color:var(--dim);font-family:var(--mono);font-size:.72rem}
+.stack{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--raised)}.stack i{display:block;height:100%}
+.pct{font:.76rem var(--mono);color:var(--dim);text-align:right}
+.esp{margin-top:14px;font:.72rem var(--mono);color:var(--dim)}.esp b{background:#245650;color:var(--accent);padding:2px 6px;border-radius:3px;margin-right:8px}
+.empty{color:var(--dim);font-size:.85rem;padding:24px 0;text-align:center}
+.hide{display:none}
+</style></head><body><div class="wrap">
+<header>
+ <div><h1>ESP Flow Classifier</h1><div class="sub">Identifies traffic type inside an encrypted IPsec tunnel from packet size and timing alone. The payload is never decrypted.</div></div>
+ <div class="conn"><span class="dot" id="dot"></span><span id="st">checking</span><input id="api" value="http://127.0.0.1:8000" size="22" spellcheck="false"></div>
+</header>
+
+<div class="tabs"><button class="tab on" data-tab="up">Upload capture</button><button class="tab" data-tab="live">Live capture</button></div>
+
+<div class="panel" id="tab-up">
+ <div class="row"><input type="file" id="file" accept=".pcap,.pcapng,.cap"><button class="go" id="goUp">Classify capture</button></div>
+ <div class="hint">Choose a .pcap recorded on the tunnel interface. Each 2-second window gets its own prediction. Smaller files (a few MB) upload fastest.</div>
+</div>
+
+<div class="panel hide" id="tab-live">
+ <div class="row"><select id="iface"></select><button class="tab" id="refresh" style="padding:8px 12px">Refresh</button>
+ <button class="go" id="start">Start</button><button class="stop" id="stop" disabled>Stop</button></div>
+ <div class="hint" id="liveStat">Pick a device and press Start. Predictions appear every 2 seconds while traffic flows.</div>
+</div>
+
+<div id="error"></div>
+<div class="panel" id="out"><div class="empty">No results yet.</div></div>
+</div>
+
+<script>
+const C={icmp:'#8CA0B3',web:'#4fd1c5',video:'#f2b84b',voip:'#e2685a'};
+const $=id=>document.getElementById(id),base=()=>$('api').value.replace(/\/$/,'');
+let liveItems=[],since=0,timer=null;
+
+function err(m){$('error').innerHTML=m?`<div class="err">${m}</div>`:''}
+async function api(path,opt){const r=await fetch(base()+path,opt);if(!r.ok){let d='';try{d=(await r.json()).detail}catch(e){}throw new Error(d||('Server responded '+r.status))}return r.json()}
+
+async function health(){try{const d=await api('/health');$('dot').className='dot '+(d.model_loaded?'up':'down');$('st').textContent=d.model_loaded?'model loaded':'model missing';loadIfaces()}catch(e){$('dot').className='dot down';$('st').textContent='unreachable'}}
+async function loadIfaces(){try{const l=await api('/interfaces');$('iface').innerHTML=l.map(i=>`<option value="${i.id}">${i.label}</option>`).join('')}catch(e){}}
+$('api').addEventListener('change',health);$('refresh').addEventListener('click',loadIfaces);health();
+
+document.querySelectorAll('.tab[data-tab]').forEach(b=>b.addEventListener('click',()=>{
+ document.querySelectorAll('.tab[data-tab]').forEach(x=>x.classList.toggle('on',x===b));
+ $('tab-up').classList.toggle('hide',b.dataset.tab!=='up');$('tab-live').classList.toggle('hide',b.dataset.tab!=='live');}));
+
+function row(r,tag){const p=r.probabilities,conf=p[r.label]||0;
+ const stack=Object.entries(p).sort((a,b)=>b[1]-a[1]).map(([l,v])=>`<i style="width:${v*100}%;background:${C[l]||'#4fd1c5'}"></i>`).join('');
+ return `<div class="item"><div class="meta">${tag}</div><div class="lbl" style="color:${C[r.label]||'#e7eef5'}">${r.label}</div><div class="stack">${stack}</div><div class="pct">${(conf*100).toFixed(0)}%</div></div>`}
+
+function render(items,tagOf,note){
+ if(!items.length){$('out').innerHTML='<div class="empty">'+note+'</div>';return}
+ const n={};items.forEach(r=>n[r.label]=(n[r.label]||0)+1);
+ const top=Object.entries(n).sort((a,b)=>b[1]-a[1])[0][0];
+ $('out').innerHTML=`<div class="big" style="color:${C[top]||'#e7eef5'}">${top}</div>
+  <div class="note">${n[top]} of ${items.length} windows classified as ${top}</div>
+  ${items.map(tagOf).join('')}
+  <div class="esp"><b>ESP</b>classified from encrypted IPsec packets — payload never inspected</div>`}
+
+$('goUp').addEventListener('click',async()=>{
+ const f=$('file').files[0];if(!f){err('Choose a .pcap file first.');return}
+ err('');$('goUp').disabled=true;$('goUp').textContent='Classifying...';
+ try{const d=await api('/upload-pcap',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:await f.arrayBuffer()});
+  render(d.results,r=>row(r,'window '+r.window),d.esp_packets?'ESP packets were found, but no window had enough of them to classify.':'No ESP packets in this capture. Record on the tunnel interface (for example enp0s8) while the IPsec tunnel is up.')}
+ catch(e){err('Could not classify this capture: '+e.message)}
+ $('goUp').disabled=false;$('goUp').textContent='Classify capture'});
+
+async function poll(){try{const d=await api('/capture/results?since='+since);since=d.next;
+  liveItems=liveItems.concat(d.results);
+  $('liveStat').textContent=`Capturing on ${d.iface}: ${d.seen} packets seen, ${d.esp} ESP.`+(d.seen&&!d.esp?' No ESP yet — this device may not carry the tunnel.':'');
+  render(liveItems.slice().reverse().slice(0,30),r=>row(r,r.t),'Waiting for ESP traffic...');
+  if(!d.running)stopUi()}catch(e){err('Lost connection to the server: '+e.message);stopUi()}}
+function stopUi(){clearInterval(timer);timer=null;$('start').disabled=false;$('stop').disabled=true}
+
+$('start').addEventListener('click',async()=>{
+ err('');liveItems=[];since=0;
+ try{await api('/capture/start?iface='+encodeURIComponent($('iface').value),{method:'POST'});
+  $('start').disabled=true;$('stop').disabled=false;timer=setInterval(poll,1500);poll()}
+ catch(e){err(e.message)}});
+$('stop').addEventListener('click',async()=>{try{await api('/capture/stop',{method:'POST'})}catch(e){}stopUi()});
+</script></body></html>
