@@ -1,2 +1,8 @@
+[project]
+name = "sih26160-ipsec-traffic-classifier"
+version = "0.1.0"
+description = "IPsec Traffic Classifier"
+requires-python = ">=3.10"
+
 [tool.vercel]
 entrypoint = "api:app"
